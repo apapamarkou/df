@@ -1,0 +1,284 @@
+#!/usr/bin/env python3
+
+import os
+import sys
+import json
+import time
+import platform
+import subprocess
+from pathlib import Path
+from datetime import datetime
+
+MODEL = os.environ.get("AI_MODEL", "llama3")
+HISTORY_FILE = Path.home() / ".ai_history.md"
+SYSINFO_CACHE = Path.home() / ".ai_sysinfo.json"
+MAX_CONTEXT = 20
+
+
+# --------------------------------------------------
+# distro detection
+# --------------------------------------------------
+
+def get_distro():
+    try:
+        data = {}
+        with open("/etc/os-release") as f:
+            for line in f:
+                if "=" in line:
+                    k, v = line.strip().split("=", 1)
+                    data[k] = v.strip('"')
+        return f"{data.get('NAME')} {data.get('VERSION','')}".strip()
+    except:
+        return platform.system()
+
+
+# --------------------------------------------------
+# system info
+# --------------------------------------------------
+
+def get_system_info():
+
+    info = {}
+
+    info["distro"] = get_distro()
+    info["kernel"] = platform.release()
+    info["arch"] = platform.machine()
+
+    cpu = platform.processor()
+
+    if not cpu:
+        try:
+            with open("/proc/cpuinfo") as f:
+                for line in f:
+                    if "model name" in line:
+                        cpu = line.split(":",1)[1].strip()
+                        break
+        except:
+            cpu = "unknown"
+
+    info["cpu"] = cpu
+
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemTotal"):
+                    mem_kb = int(line.split()[1])
+                    info["ram_gb"] = round(mem_kb / 1024 / 1024,1)
+                    break
+    except:
+        info["ram_gb"] = "unknown"
+
+    return info
+
+
+# --------------------------------------------------
+# cache system info (1 φορά την ημέρα)
+# --------------------------------------------------
+
+def load_system_info():
+
+    if SYSINFO_CACHE.exists():
+
+        age = time.time() - SYSINFO_CACHE.stat().st_mtime
+
+        if age < 86400:
+            return json.loads(SYSINFO_CACHE.read_text())
+
+    info = get_system_info()
+
+    SYSINFO_CACHE.write_text(json.dumps(info, indent=2))
+
+    return info
+
+
+# --------------------------------------------------
+# format system info
+# --------------------------------------------------
+
+def format_sysinfo(info):
+
+    return f"""
+System Info
+-----------
+
+Distro: {info['distro']}
+Kernel: {info['kernel']}
+Arch: {info['arch']}
+CPU: {info['cpu']}
+RAM: {info['ram_gb']} GB
+"""
+
+
+# --------------------------------------------------
+# history context
+# --------------------------------------------------
+
+def get_context():
+
+    if not HISTORY_FILE.exists():
+        return ""
+
+    lines = HISTORY_FILE.read_text().split("\n")
+
+    return "\n".join(lines[-MAX_CONTEXT*6:])
+
+
+# --------------------------------------------------
+# append history
+# --------------------------------------------------
+
+def save_history(question, answer):
+
+    with open(HISTORY_FILE,"a") as f:
+
+        f.write(f"\n## {datetime.now()}\n")
+        f.write(f"### User\n{question}\n\n")
+        f.write(f"### AI\n{answer}\n")
+
+
+# --------------------------------------------------
+# streaming ollama
+# --------------------------------------------------
+
+def run_ai(prompt):
+
+    cmd = ["ollama","run",MODEL]
+
+    p = subprocess.Popen(
+        cmd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True
+    )
+
+    p.stdin.write(prompt)
+    p.stdin.close()
+
+    answer = ""
+
+    for line in p.stdout:
+        print(line,end="",flush=True)
+        answer += line
+
+    return answer
+
+
+# --------------------------------------------------
+# ask
+# --------------------------------------------------
+
+def ask(question):
+
+    sysinfo = format_sysinfo(load_system_info())
+
+    context = get_context()
+
+    prompt = f"""
+You are a helpful terminal assistant.
+
+{sysinfo}
+
+Conversation context:
+
+{context}
+
+User question:
+{question}
+
+Answer in markdown.
+"""
+
+    answer = run_ai(prompt)
+
+    save_history(question,answer)
+
+
+# --------------------------------------------------
+# commit helper
+# --------------------------------------------------
+
+def commit():
+
+    diff = subprocess.getoutput("git diff")
+
+    if not diff:
+        print("No changes.")
+        return
+
+    prompt = f"""
+Write a concise git commit message for this diff.
+
+{diff}
+"""
+
+    suggestion = subprocess.getoutput(f"ollama run {MODEL} '{prompt}'")
+
+    editor = os.environ.get("EDITOR","nano")
+
+    tmp = Path("/tmp/ai_commit.txt")
+    tmp.write_text(suggestion)
+
+    subprocess.call([editor,str(tmp)])
+
+    message = tmp.read_text()
+
+    print("\nCommit message:\n")
+    print(message)
+
+    yn = input("\nCommit? (Y/n): ")
+
+    if yn.lower() in ["","y","yes"]:
+        subprocess.call(["git","commit","-am",message])
+    else:
+        print("Cancelled")
+
+
+# --------------------------------------------------
+# help
+# --------------------------------------------------
+
+def help():
+
+    print("""
+ai ask <question>
+
+ai commit
+
+ai help
+
+ai <question>   (shortcut for ask)
+""")
+
+
+# --------------------------------------------------
+# main
+# --------------------------------------------------
+
+def main():
+
+    if len(sys.argv) == 1:
+        help()
+        return
+
+    cmd = sys.argv[1]
+
+    if cmd == "help":
+        help()
+        return
+
+    if cmd == "commit":
+        commit()
+        return
+
+    if cmd == "ask":
+        question = " ".join(sys.argv[2:])
+        ask(question)
+        return
+
+    question = " ".join(sys.argv[1:])
+    ask(question)
+
+
+if __name__ == "__main__":
+    main()

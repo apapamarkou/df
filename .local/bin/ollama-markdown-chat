@@ -1,0 +1,166 @@
+#!/usr/bin/env python3
+
+# __   __    _   _ _   _ ___  __
+# \ \ / /__ | | | | \ | (_) \/ /
+#  \ V / _ \| | | |  \| | |\  / 
+#   | | (_) | |_| | |\  | |/  \ 
+#   |_|\___/ \___/|_| \_|_/_/\_\
+#
+# Lisence GPL3
+# Homepage: https://github.com/apapamarkou/younix
+# Author: Andrianos Papamarkou
+# Email: papamarkoua@gmail.com
+
+import requests
+import json
+from rich.console import Console, Group
+from rich.live import Live
+from rich.markdown import Markdown
+from rich.spinner import Spinner
+from rich.syntax import Syntax
+from prompt_toolkit import PromptSession
+from prompt_toolkit.history import InMemoryHistory
+from prompt_toolkit.styles import Style
+from prompt_toolkit.formatted_text import HTML
+
+console = Console()
+MODEL_NAME = "codellama"
+chat_history = []
+
+history_session = InMemoryHistory()
+session = PromptSession(history=history_session)
+
+style = Style.from_dict({
+    "prompt": "ansiyellow bold",
+})
+
+
+# --------------------------------------------
+# SAFE RENDERER
+# --------------------------------------------
+
+def render_with_code_highlight(text: str):
+    """
+    Highlight code blocks only if they are CLOSED.
+    If there's an open ``` block, render everything as Markdown.
+    """
+
+    # Αν αριθμός ``` είναι μονός -> υπάρχει ανοιχτό block
+    if text.count("```") % 2 != 0:
+        return Markdown(text)
+
+    if "```" not in text:
+        return Markdown(text)
+
+    parts = text.split("```")
+    rendered = []
+
+    for i, part in enumerate(parts):
+        if i % 2 == 0:
+            # Κανονικό markdown
+            if part.strip():
+                rendered.append(Markdown(part))
+        else:
+            # Code block (είναι guaranteed closed εδώ)
+            lines = part.strip().split("\n")
+
+            if not lines:
+                continue
+
+            language = lines[0].strip() or "python"
+            code = "\n".join(lines[1:])
+
+            rendered.append(
+                Syntax(
+                    code,
+                    language,
+                    theme="monokai",
+                    word_wrap=True
+                )
+            )
+
+    return Group(*rendered)
+
+
+# --------------------------------------------
+# OLLAMA STREAM
+# --------------------------------------------
+
+def ask_ollama(prompt):
+    chat_history.append({"role": "user", "content": prompt})
+
+    payload = {
+        "model": MODEL_NAME,
+        "messages": chat_history,
+        "stream": True
+    }
+
+    try:
+        r = requests.post(
+            "http://localhost:11434/api/chat",
+            json=payload,
+            stream=True
+        )
+        r.raise_for_status()
+    except requests.exceptions.ConnectionError:
+        console.print("❌ Ollama server not running. Run `ollama serve`.")
+        return
+
+    full_text = ""
+    first_token = False
+
+    with Live(console=console, refresh_per_second=20) as live:
+        spinner = Spinner("dots", text=" Thinking...")
+        live.update(spinner)
+
+        for line in r.iter_lines(decode_unicode=True):
+            if not line:
+                continue
+
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            if "message" in obj and "content" in obj["message"]:
+                chunk = obj["message"]["content"]
+                full_text += chunk
+
+                if not first_token:
+                    first_token = True
+
+                rendered = render_with_code_highlight(full_text)
+                live.update(rendered)
+
+    chat_history.append({"role": "assistant", "content": full_text})
+
+
+# --------------------------------------------
+# MAIN LOOP
+# --------------------------------------------
+
+def main():
+    console.print(f"\n[bold green]Ollama Advanced Chat - {MODEL_NAME}[/bold green]\n")
+
+    while True:
+        try:
+            console.print("\n[bold cyan]----------------------------------[/bold cyan]")
+
+            prompt = session.prompt(
+                HTML('<prompt>You:</prompt> '),
+                multiline=True,
+                style=style
+            )
+
+            if prompt.strip().lower() in ["exit", "quit"]:
+                console.print("[bold red]Bye![/bold red]")
+                break
+
+            ask_ollama(prompt)
+
+        except KeyboardInterrupt:
+            continue
+
+
+if __name__ == "__main__":
+    main()
