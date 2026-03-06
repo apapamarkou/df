@@ -1,0 +1,9 @@
+#!/usr/bin/env sh
+
+if [ -f "$NNN_SEL" ]; then
+    while read -r file; do
+        dotfiles rm --cached "$file"
+    done < "$NNN_SEL"
+else
+    dotfiles rm --cached "$f"
+fi

@@ -1,0 +1,9 @@
+#!/usr/bin/env sh
+
+if [ -f "$NNN_SEL" ]; then
+    while read -r file; do
+        dotfiles add "$file"
+    done < "$NNN_SEL"
+else
+    dotfiles add "$f"
+fi
